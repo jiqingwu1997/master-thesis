@@ -1,0 +1,313 @@
+---
+title: "xrnet-simulation"
+author: "ks"
+date: "12/16/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(MASS)  # Package needed to generate correlated precictors
+library(glmnet)  # Package to fit ridge/lasso/elastic net models
+library(xrnet)   # Package to fit xrnet models
+```
+
+## Independent X variables
+
+When X variables are independent, and only a small number of them are related to outcome, we expect the LASSO model to have lower MSE than Ridge or Elastic-net regression (see examples from https://www4.stat.ncsu.edu/~post/josh/LASSO_Ridge_Elastic_Net_-_Examples.html#generate-data).
+
+First,  let's simulate the X variables (DNA methylation values).
+
+n=1000 observations
+p=5000 predictor variables
+
+For a single individual, the 5000 features will have a bimodal distribution with peaks near 0.1 and 0.9 (DNA methylation is between 0,1). 
+2500 DNAmX1  ~  Beta(2.5,30)
+2500 DNAmX2 ~  Beta(30,2.5)
+
+```{r dnam-values}
+set.seed(44)
+n <- 1000  # Number of observations
+p <- 5000  # Number of predictors included in model
+DNAmX1  <-  replicate(p/2,rbeta(n,2.5,30))
+DNAmX2  <-  replicate(p/2,rbeta(n,30,2.5))
+x <- cbind(DNAmX1,DNAmX2)
+par(mfrow=c(2,2))
+plot(density(x[1,]),xlab="Beta value",main="Sample profile (n=5000 measures)")
+for (i in 2:9) lines(density(x[i,]),col=i)
+plot(density(x[,1]),xlab="Beta value",main="10 Predictors (X[,1:10]) (n=1000)")
+for (i in 2:9) lines(density(x[,i]),col=i)
+plot(density(x[,2501]),xlab="Beta value",main="10 Predictors (X[,2501:2510]) (n=1000)")
+for (i in 2:9) lines(density(x[,i+2500]),col=i)
+```
+
+```{r simy}
+# Generate data
+set.seed(19875)  # Set seed for reproducibility
+#Coefficients = 20-10's, 20-20's, 4960- 0's
+ni  <- 20
+#bcoef <- c(rep(10,ni),rep(20,ni),rep(0,p-2*ni)) 
+alpha <- c(10,20)
+z <- cbind(z1 = c(rep(1,ni),rep(0,5000-ni)),
+           z2 = c(rep(0,ni),rep(1,ni),rep(0,5000-2*ni))
+)
+bcoef <- z%*%alpha
+y <- 10 + x%*%bcoef + rnorm(40)
+hist(y)
+
+# Split data into train (2/3) and test (1/3) sets
+train_rows <- sample(1:n, .66*n)
+x.train <- x[train_rows, ]
+x.test <- x[-train_rows, ]
+
+y.train <- y[train_rows]
+y.test <- y[-train_rows]
+```
+
+```{r fit-models-indepX}
+set.seed(34)
+list.of.fits <- list()
+for (i in 0:10){
+  fit.name <- paste0("alpha", i/10)
+  
+  list.of.fits[[fit.name]] <-
+    cv.glmnet(x.train, y.train, type.measure = "mse", alpha = i/10,
+              family = "gaussian")
+}
+
+results <- data.frame()
+for (i in 0:10){
+  fit.name <- paste0("alpha", i/10)
+  
+  predicted <-
+    predict(list.of.fits[[fit.name]] ,
+           s = list.of.fits[[fit.name]]$lambda.1se, newx = x.test)
+  
+  mse <- mean((y.test - predicted)^2)
+  
+  temp  <- data.frame(alpha = i/10, mse =  mse, fit.name = fit.name)
+  results <- rbind(results,temp)
+}
+
+results
+
+```
+
+Now I want to see the coefficient estimates from my final model. Let's fit the LASSO.
+
+```{r lasso}
+fit.lasso <- glmnet(x.train, y.train, family="gaussian", alpha=1)
+fit.lasso.cv <- cv.glmnet(x.train, y.train, type.measure="mse", alpha=1, 
+                          family="gaussian")
+```
+
+```{r plot}
+par(mfrow=c(1,2))
+plot(fit.lasso)
+plot(fit.lasso.cv)
+```
+
+Very nice.  The left figure shows the groups of predictors that share the same true coefficient (0, 10, 20). The  figure on the right shows a big signal in these data for reducing mse.
+
+```{r coefs}
+coef.fit <- as.matrix(coef(fit.lasso.cv,s="lambda.1se"))
+coef.fit <- as.matrix(coef.fit[coef.fit[,1]!=0,])
+dim(coef.fit)
+```
+
+The final model has 140 coefficients (intercept +  139 predictors).
+
+## Fit xrnet model
+
+```{r cv}
+set.seed(22)
+cv_xrnet <- tune_xrnet(
+x = x.train,
+y = y.train,
+external = z,
+family = "gaussian",
+#control = xrnet.control(tolerance = 1e-6)
+penalty_main = define_lasso()
+)
+## Get coefficient estimates at optimal penalty combination
+coef_opt <- coef(cv_xrnet)
+```
+
+```{r predict}
+#estimates <- coef(cv_xrnet)
+predy <- predict(cv_xrnet, newdata = x.test)
+mse1 <- mean((y.test - predy)^2)
+mse1
+```
+
+This mse is lower than from the ordinary Lasso.  How many coefficients are non-zero?
+
+```{r }
+sum(coef_opt$betas!=0)
+```
+
+This is the actual number of non-zero parameters.
+
+```{r }
+coef_opt$betas[coef_opt$betas!=0]
+```
+
+This estimated the 20 coefficients near 10 and the 20 coefficients near 20.
+
+When the 5000 features are independent, using the external information in xrnet reduced the mse, providing a better prediction model.
+
+```{r compare-coef}
+coef.fit <- as.matrix(coef(fit.lasso.cv,s="lambda.1se"))[-1]
+length(coef.fit)
+compcoef <- cbind.data.frame(lassocoef = coef.fit,
+                             xrnetcoef = coef_opt$betas)
+compcoef <- compcoef[compcoef$lassocoef!=0,]
+nr <- nrow(compcoef)
+nr
+```
+
+```{r plot}
+df<- data.frame(model = c(rep("LASSO",nr),rep("xrnet",nr)),
+                       coef = c(compcoef$lassocoef,compcoef$xrnetcoef),
+                xvar = c(c(1:nr),c(1:nr)))
+
+p <- ggplot(data = df ,aes(x = model, y = coef, group = xvar))
+print(p + geom_line())
+```
+
+What does this show?
+
+## Add fake Z variables
+
+Now add 3 'decoy' (fake/non-informative) Z variables to the external_Z matrix.
+
+```{r z-decoys}
+zdecoy <- cbind(z3 = c(rep(0,2*ni),rep(1,ni),rep(0,5000-3*ni)),
+                z4 = c(rep(0,3*ni),rep(1,ni),rep(0,5000-4*ni)),
+                z5 = c(rep(0,4*ni),rep(1,ni),rep(0,5000-5*ni))
+)
+extz <- cbind(z,zdecoy)
+
+set.seed(22)
+cv_xrnet <- tune_xrnet(
+x = x.train,
+y = y.train,
+external = extz,
+family = "gaussian",
+#control = xrnet.control(tolerance = 1e-6)
+penalty_main = define_lasso(),
+  penalty_external = define_lasso()
+)
+## Get coefficient estimates at optimal penalty combination
+coef_opt <- coef(cv_xrnet)
+```
+
+Now what is the mse?
+
+```{r predict}
+#estimates <- coef(cv_xrnet)
+predy <- predict(cv_xrnet, newdata = x.test)
+mse1 <- mean((y.test - predy)^2)
+mse1
+```
+
+Nearly the same.
+
+And, check the coefficients again.
+
+Does the lasso on the z matrix save just the first 2 Z variables?
+
+## Correlated X variables
+
+What happens when there is correlation and elastic-net is better than lasso? Does the external information in xrnet still have the lowest mse?
+
+Off-hand, I'm not sure how to do this with Beta-distributed X variables. Let's switch to a multivariate normal distribution for X and the example from NCState. Here's example-3. 
+https://www4.stat.ncsu.edu/~post/josh/LASSO_Ridge_Elastic_Net_-_Examples.html#example-3 [NOTE: I still need to create the Z matrix. How?]
+
+**** THIS NEEDS CHECKING*****
+
+```{r sim_datmat}
+set.seed(19873)
+n <- 100    # Number of observations
+p <- 50     # Number of predictors included in model
+CovMatrix <- outer(1:p, 1:p, function(x,y) {.7^abs(x-y)})
+x <- mvrnorm(n, rep(0,p), CovMatrix)
+y <- 10 * apply(x[, 1:2], 1, sum) + 
+  5 * apply(x[, 3:4], 1, sum) +
+  apply(x[, 5:14], 1, sum) +
+  rnorm(n)
+
+# Split data into train and test sets
+train_rows <- sample(1:n, .66*n)
+x.train <- x[train_rows, ]
+x.test <- x[-train_rows, ]
+
+y.train <- y[train_rows]
+y.test <- y[-train_rows]
+```
+
+
+
+```{r }
+fit.lasso <- glmnet(x.train, y.train, family="gaussian", alpha=1)
+fit.ridge <- glmnet(x.train, y.train, family="gaussian", alpha=0)
+fit.elnet <- glmnet(x.train, y.train, family="gaussian", alpha=.5)
+
+
+# 10-fold Cross validation for each alpha = 0, 0.1, ... , 0.9, 1.0
+fit.lasso.cv <- cv.glmnet(x.train, y.train, type.measure="mse", alpha=1, 
+                          family="gaussian")
+fit.ridge.cv <- cv.glmnet(x.train, y.train, type.measure="mse", alpha=0,
+                          family="gaussian")
+fit.elnet.cv <- cv.glmnet(x.train, y.train, type.measure="mse", alpha=.5,
+                          family="gaussian")
+
+for (i in 0:10) {
+    assign(paste("fit", i, sep=""), cv.glmnet(x.train, y.train, type.measure="mse", 
+                                              alpha=i/10,family="gaussian"))
+}
+```
+
+
+
+```{r mse}
+yhat0 <- predict(fit0, s=fit0$lambda.1se, newx=x.test)
+yhat1 <- predict(fit1, s=fit1$lambda.1se, newx=x.test)
+yhat2 <- predict(fit2, s=fit2$lambda.1se, newx=x.test)
+yhat3 <- predict(fit3, s=fit3$lambda.1se, newx=x.test)
+yhat4 <- predict(fit4, s=fit4$lambda.1se, newx=x.test)
+yhat5 <- predict(fit5, s=fit5$lambda.1se, newx=x.test)
+yhat6 <- predict(fit6, s=fit6$lambda.1se, newx=x.test)
+yhat7 <- predict(fit7, s=fit7$lambda.1se, newx=x.test)
+yhat8 <- predict(fit8, s=fit8$lambda.1se, newx=x.test)
+yhat9 <- predict(fit9, s=fit9$lambda.1se, newx=x.test)
+yhat10 <- predict(fit10, s=fit10$lambda.1se, newx=x.test)
+
+mse0 <- mean((y.test - yhat0)^2)
+mse1 <- mean((y.test - yhat1)^2)
+mse2 <- mean((y.test - yhat2)^2)
+mse3 <- mean((y.test - yhat3)^2)
+mse4 <- mean((y.test - yhat4)^2)
+mse5 <- mean((y.test - yhat5)^2)
+mse6 <- mean((y.test - yhat6)^2)
+mse7 <- mean((y.test - yhat7)^2)
+mse8 <- mean((y.test - yhat8)^2)
+mse9 <- mean((y.test - yhat9)^2)
+mse10 <- mean((y.test - yhat10)^2)
+```
+
+```{r tabs}
+mse0
+mse2
+mse4
+mse6
+mse8
+mse10
+```
+
+Summarize the elastic net results.
+Repeat this with a Z matrix in xrnet.  Can xrnet predict better than elastic net? Why or why not?
+
+```{r si}
+sessionInfo()
+```

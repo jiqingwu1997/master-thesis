@@ -1,0 +1,365 @@
+---
+title: "xrnet"
+output: html_document
+---
+```{r}
+library(dplyr)
+library(xrnet)
+library(varhandle)
+library(MASS)   
+library(readxl)
+load("/Users/jiqingwu/Desktop/sh.rda")
+```
+
+```{r}
+set.seed(22)    
+n <- ncol(sh$BVals)
+train_rows <- sample(1:n, .66*n)
+
+x.train <- t(sh$BVals)[train_rows, ]
+x.test <- t(sh$BVals)[-train_rows, ]
+
+y.train <- sh$targets$age[train_rows]
+y.test <- sh$targets$age[-train_rows]
+
+ext <- sh$annot
+names(ext)
+```
+
+```{r}
+ext$newGroup <- sapply(ext$UCSC_RefGene_Group,function(x){
+  strsplit(x,";")[[1]][1]
+  })
+
+ext$Enhancer[is.na(ext$Enhancer)]<-0
+head(ext$Enhancer)
+head(ext)
+
+ext$DHS[is.na(ext$DHS)]<-0
+str(ext$DHS)
+```
+UCSC_RefGene_Group
+CHR
+Relation_to_UCSC_CpG_Island
+Enhancer
+
+```{r}
+RefGeneGroup <- cbind(to.dummy(ext$newGroup, "RefGene"),
+              # to.dummy(ext$CHR, "RefGene"),
+               to.dummy(ext$Relation_to_UCSC_CpG_Island, "RefGene"),
+               Enhancer=ext$Enhancer,
+               DHS=ext$DHS)
+
+rownames(RefGeneGroup)<-rownames(ext)
+
+
+#head(Group)
+head(RefGeneGroup)
+dim(RefGeneGroup)
+```
+
+# Boxplot 
+
+```{r}
+  cv_xrnet <- tune_xrnet(
+    x = x.train,
+    y = y.train,
+    external = RefGeneGroup,
+    family = "gaussian",
+    control = xrnet.control(tolerance = 1e-6)
+  )
+
+coef(cv_xrnet)
+```
+
+
+```{r}
+coefValue <- coef(cv_xrnet)
+
+data <- cbind(RefGeneGroup,coefValue$betas)
+colnames(data)[16]="betas"
+colnames(data)
+
+#install.packages("cowplot")
+library(cowplot)
+G <- as.data.frame(data)
+
+R <- as.data.frame(RefGeneGroup)
+
+p1 <- ggplot(G, aes(y=betas)) + 
+    geom_boxplot() +
+    facet_wrap(~Enhancer)+
+    ggtitle("Enhancer")
+
+p2 <- ggplot(G, aes(y=betas)) + 
+    geom_boxplot() +
+    facet_wrap(~DHS)+
+    ggtitle("DHS")
+
+p3 <- ggplot(G, aes(y=betas)) + 
+    geom_boxplot() +
+    facet_wrap(~RefGene.1stExon)+
+    ggtitle("1stExon")
+
+p4 <- ggplot(G, aes(y=betas)) + 
+    geom_boxplot() +
+    facet_wrap(~`RefGene.3'UTR`)+
+    ggtitle("3'UTR")
+
+p5 <- ggplot(G, aes(y=betas)) + 
+    geom_boxplot() +
+    facet_wrap(~`RefGene.5'UTR`)+
+    ggtitle("5'UTR")
+
+p6 <- ggplot(G, aes(y=betas)) + 
+    geom_boxplot() +
+    facet_wrap(~RefGene.Body)+
+    ggtitle("Body")
+
+p7 <- ggplot(G, aes(y=betas)) + 
+    geom_boxplot() +
+    facet_wrap(~RefGene.TSS1500)+
+    ggtitle("TSS1500")
+
+p8 <- ggplot(G, aes(y=betas)) + 
+    geom_boxplot() +
+    facet_wrap(~RefGene.TSS200)+
+    ggtitle("TSS200")
+
+p9 <- ggplot(G, aes(y=betas)) + 
+    geom_boxplot() +
+    facet_wrap(~RefGene.Island)+
+    ggtitle("Island")
+
+plot_grid(p1,p2,p3,p4,p5,p6,p7,p8,p9)
+```
+
+
+# Use a random data matrix 
+
+```{r}
+set.seed(19875)  
+n <- 10000  
+p <- 15  
+
+ext_temp <- matrix(runif(n*p, min = 0.1, max = 0.2), nrow=n, ncol=p)
+dim(ext_temp)
+new<-matrix(sample(RefGeneGroup),nrow=n,ncol=p)
+```
+
+```{r}
+#mse1=c()mse1[i] = mean((y.test - y_pre) ^ 2)
+# with external data
+temp <- c()
+  
+for (i in 1:10) {
+  
+  cv_xrnet <- tune_xrnet(
+    x = x.train,
+    y = y.train,
+    external = new,
+    family = "gaussian",
+    control = xrnet.control(tolerance = 1e-6)
+  )
+  
+  y_pre <- predict(cv_xrnet, newdata = x.test, type = "response")
+  if(i == 1){
+    temp[i] = mean((y.test - y_pre) ^ 2)
+  }else{
+    temp[i] = temp[i-1] + mean((y.test - y_pre) ^ 2)
+  }
+}
+temp
+temp[10] / 10
+```
+
+
+```{r}
+# without external data
+temp <- c()
+  
+for (i in 1:20) {
+  
+  cv_xrnet <- tune_xrnet(
+    x = x.train,
+    y = y.train,
+    #external = RefGeneGroup,
+    family = "gaussian",
+    control = xrnet.control(tolerance = 1e-6)
+  )
+  
+  y_pre <- predict(cv_xrnet, newdata = x.test, type = "response")
+  if(i == 1){
+    temp[i] = mean((y.test - y_pre) ^ 2)
+  }else{
+    temp[i] = temp[i-1] + mean((y.test - y_pre) ^ 2)
+  }
+}
+temp
+temp[20] / 20
+```
+
+
+
+
+
+## Whole data set
+
+```{r}
+ThesisResult <- read_excel("/Users/jiqingwu/Desktop/master thesis/mmc2.xlsx",sheet=1,na="NA")
+```
+
+```{r}
+load("/Users/jiqingwu/Desktop/master thesis/hannum.rda")
+```
+
+```{r}
+dat <- hannum$annot
+dat$newID <- dat$ID %in% ThesisResult$Marker
+str(dat$newID)
+
+dat$Enhancer[is.na(dat$Enhancer)]<-0
+str(dat$Enhancer)
+
+dat$newGroup <- sapply(dat$UCSC_RefGene_Group,function(x){
+  strsplit(x,";")[[1]][1]
+  })
+newdat <- to.dummy(dat$newGroup, "RefGene")
+
+```
+
+```{r}
+table1 = table(dat$newID, newDat$RefGene.TSS200) 
+table1
+prop.table(table1,1)
+chisq.test(table1)
+```
+
+## Use 71 gene to fit the model 
+
+```{r}
+cv_xrnet <- tune_xrnet(
+    x = x.train,
+    y = y.train,
+    external = RefGeneGroup,
+    family = "gaussian",
+    control = xrnet.control(tolerance = 1e-6))
+#coef(cv_xrnet)
+plot(cv_xrnet)
+```
+
+
+
+```{r}
+
+```
+
+
+
+
+# Xrnet for the whole hannum data
+
+```{r}
+
+set.seed(22)    
+n <- ncol(hannum$BVals)
+train_rows <- sample(1:n, .66*n)
+
+x_train <- t(hannum$BVals)[train_rows, ]
+x_test <- t(hannum$BVals)[-train_rows, ]
+
+y_train <- hannum$targets$age[train_rows]
+y_test <- hannum$targets$age[-train_rows]
+
+Ext <- hannum$annot
+names(Ext)
+
+```
+
+```{r}
+Ext$newGroup <- sapply(Ext$UCSC_RefGene_Group,function(x){
+  strsplit(x,";")[[1]][1]
+  })
+
+Ext$Enhancer[is.na(Ext$Enhancer)]<-0
+head(Ext$Enhancer)
+head(Ext)
+
+Ext$DHS[is.na(Ext$DHS)]<-0
+
+
+GroupH <- cbind(to.dummy(Ext$newGroup, "RefGene"),
+              # to.dummy(ext$CHR, "RefGene"),
+               to.dummy(Ext$Relation_to_UCSC_CpG_Island, "RefGene"),
+               Enhancer=Ext$Enhancer,
+               DHS=Ext$DHS)
+
+rownames(GroupH)<-rownames(Ext)
+
+
+head(GroupH)
+dim(GroupH)
+```
+
+```{r}
+# with external data
+temp <- c()
+  
+for (i in 1:20) {
+  
+  cv_xrnet <- tune_xrnet(
+    x = x_train,
+    y = y_train,
+    external = Group,
+    family = "gaussian",
+    control = xrnet.control(tolerance = 1e-6)
+  )
+  
+  y_pre <- predict(cv_xrnet, newdata = x_test, type = "response")
+  if(i == 1){
+    temp[i] = mean((y_test - y_pre) ^ 2)
+  }else{
+    temp[i] = temp[i-1] + mean((y_test - y_pre) ^ 2)
+  }
+}
+temp
+temp[20] / 20
+```
+
+```{r}
+# without external data
+temp <- c()
+  
+for (i in 1:20) {
+  
+  cv_xrnet <- tune_xrnet(
+    x = x_train,
+    y = y_train,
+    #external = Group,
+    family = "gaussian",
+    control = xrnet.control(tolerance = 1e-6)
+  )
+  
+  y_pre <- predict(cv_xrnet, newdata = x_test, type = "response")
+  if(i == 1){
+    temp[i] = mean((y_test - y_pre) ^ 2)
+  }else{
+    temp[i] = temp[i-1] + mean((y_test - y_pre) ^ 2)
+  }
+}
+temp
+temp[20] / 20
+```
+
+```{r}
+  cv_xrnet <- tune_xrnet(
+    x = x_train,
+    y = y_train,
+    external = GroupH,
+    family = "gaussian",
+    control = xrnet.control(tolerance = 1e-6)
+  )
+  
+  y_pre <- predict(cv_xrnet, newdata = x_test, type = "response")
+  mean((y_test - y_pre) ^ 2)
+```
